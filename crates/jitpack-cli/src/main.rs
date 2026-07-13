@@ -29,16 +29,6 @@ mod ui {
             && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
     }
 
-    macro_rules! c {
-        ($code:expr, $text:expr) => {
-            if color_enabled() {
-                format!("{}{}{}", $code, $text, R)
-            } else {
-                $text.to_string()
-            }
-        };
-    }
-
     pub fn banner() {
         println!();
         if color_enabled() {
@@ -250,6 +240,42 @@ fn main() {
             }
         }
 
+        "list" | "ls" => {
+            if args.len() < 3 {
+                ui::error("Missing archive path.");
+                eprintln!("  Usage: jitpack list <input.jpf>");
+                return;
+            }
+            if let Err(e) = list_archive_contents(&args[2]) {
+                ui::error(&format!("List failed: {e}"));
+                std::process::exit(1);
+            }
+        }
+
+        "tree" => {
+            if args.len() < 3 {
+                ui::error("Missing archive path.");
+                eprintln!("  Usage: jitpack tree <input.jpf>");
+                return;
+            }
+            if let Err(e) = tree_archive_contents(&args[2]) {
+                ui::error(&format!("Tree failed: {e}"));
+                std::process::exit(1);
+            }
+        }
+
+        "info" => {
+            if args.len() < 3 {
+                ui::error("Missing archive path.");
+                eprintln!("  Usage: jitpack info <input.jpf>");
+                return;
+            }
+            if let Err(e) = info_archive_contents(&args[2]) {
+                ui::error(&format!("Info failed: {e}"));
+                std::process::exit(1);
+            }
+        }
+
         "help" | "--help" | "-h" => print_usage(),
 
         cmd => {
@@ -279,6 +305,9 @@ fn print_usage() {
     println!("     decompress    Extract a .jpf archive to a directory");
     println!("     sfx-pack      Bundle a .jpf into a self-extracting executable");
     println!("     query         Search for a pattern inside an archive");
+    println!("     list / ls     List files inside an archive without extracting");
+    println!("     tree          Show a visual directory tree structure of the archive");
+    println!("     info          Show detailed structural layout of the archive");
     println!("     help          Show this message");
     ui::nl();
     ui::header("Options");
@@ -397,42 +426,44 @@ fn compress(
         .map(|&chunk| compress_block(chunk))
         .collect();
 
-    let mut out_file = File::create(output_path)?;
-    out_file.write_all(b"\x7FJPF")?;
-    out_file.write_all(&2u16.to_le_bytes())?;
-
     let target_isa: u16 = if cfg!(target_arch = "aarch64") { 1 } else { 0 };
-    out_file.write_all(&target_isa.to_le_bytes())?;
-    out_file.write_all(&(input_data.len() as u64).to_le_bytes())?;
-    out_file.write_all(&(num_blocks as u64).to_le_bytes())?;
-
     let mut flags = 0u32;
     let mut salt = [0u8; 16];
     if password.is_some() {
-        flags |= 1;
+        flags |= ENCRYPTION_FLAG;
         OsRng.fill_bytes(&mut salt);
     }
-    out_file.write_all(&flags.to_le_bytes())?;
-    out_file.write_all(&salt)?;
-
     let key = password.map(|p| derive_key(p, &salt));
+    let metadata_body_len = metadata.len() + usize::from(key.is_some()) * 16;
+    let meta_total_size = 24 + 4 + metadata_body_len as u64;
+    let mut header = Vec::with_capacity(ARCHIVE_HEADER_SIZE);
+    header.extend_from_slice(ARCHIVE_MAGIC);
+    header.extend_from_slice(&ARCHIVE_VERSION.to_le_bytes());
+    header.extend_from_slice(&target_isa.to_le_bytes());
+    header.extend_from_slice(&(input_data.len() as u64).to_le_bytes());
+    header.extend_from_slice(&(num_blocks as u64).to_le_bytes());
+    header.extend_from_slice(&flags.to_le_bytes());
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&meta_total_size.to_le_bytes());
+    header.extend_from_slice(&[0u8; 4]);
+    debug_assert_eq!(header.len(), ARCHIVE_HEADER_SIZE);
 
     let (final_metadata, meta_nonce) = if let Some(ref k) = key {
-        let (enc, nonce) = encrypt_data(&metadata, k);
+        let (enc, nonce) = encrypt_data_with_aad(&metadata, k, &header);
         (enc, nonce)
     } else {
         (metadata, [0u8; 24])
     };
 
-    let meta_total_size = 24 + 4 + final_metadata.len() as u64;
-    out_file.write_all(&meta_total_size.to_le_bytes())?;
-    out_file.write_all(&[0u8; 4])?;
+    debug_assert_eq!(final_metadata.len(), metadata_body_len);
+    let mut out_file = File::create(output_path)?;
+    out_file.write_all(&header)?;
     out_file.write_all(&meta_nonce)?;
     out_file.write_all(&(final_metadata.len() as u32).to_le_bytes())?;
     out_file.write_all(&final_metadata)?;
 
     let mut compressed_total = 0usize;
-    for (prim, uncomp_len, ir, bits) in &compressed_blocks {
+    for (block_index, (prim, uncomp_len, ir, bits)) in compressed_blocks.iter().enumerate() {
         let mut body = Vec::new();
         body.extend_from_slice(ir);
         body.extend_from_slice(bits);
@@ -444,7 +475,15 @@ fn compress(
         block_header.extend_from_slice(&(bits.len() as u32).to_le_bytes());
 
         if let Some(ref k) = key {
-            let (enc_body, nonce) = encrypt_data(&body, k);
+            let aad = block_aad(
+                &header,
+                block_index as u64,
+                *prim,
+                *uncomp_len,
+                ir.len() as u32,
+                bits.len() as u32,
+            );
+            let (enc_body, nonce) = encrypt_data_with_aad(&body, k, &aad);
             out_file.write_all(&nonce)?;
             out_file.write_all(&(enc_body.len() as u32).to_le_bytes())?;
             out_file.write_all(&block_header)?;
@@ -495,68 +534,48 @@ fn decompress(input_path: &str, output_dir: &str) -> std::io::Result<()> {
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
 
-    if buffer.len() < 56 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Header too short",
-        ));
-    }
-    if &buffer[0..4] != b"\x7FJPF" {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Not a .jpf archive",
-        ));
-    }
-
-    let _version = u16::from_le_bytes(buffer[4..6].try_into().unwrap());
-    let _target_isa = u16::from_le_bytes(buffer[6..8].try_into().unwrap());
-    let uncomp_size = u64::from_le_bytes(buffer[8..16].try_into().unwrap());
-    let num_blocks = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
-    let flags = u32::from_le_bytes(buffer[24..28].try_into().unwrap());
-    let salt = &buffer[28..44];
-    let meta_total = u64::from_le_bytes(buffer[44..52].try_into().unwrap()) as usize;
-
-    let key = if (flags & 1) != 0 {
+    let archive = parse_archive(&buffer, ArchiveLimits::default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let key = if archive.is_encrypted() {
         eprint!("  Password: ");
         std::io::stderr().flush().unwrap();
         let pass = read_password().expect("Failed to read password");
-        Some(derive_key(&pass, salt))
+        Some(derive_key(&pass, &archive.header.salt))
     } else {
         None
     };
 
-    let meta_nonce: [u8; 24] = buffer[56..80].try_into().unwrap();
-    let meta_body_len = u32::from_le_bytes(buffer[80..84].try_into().unwrap()) as usize;
-    let meta_body = &buffer[84..84 + meta_body_len];
-
     let meta_data = if let Some(ref k) = key {
-        decrypt_data(meta_body, k, &meta_nonce)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        decrypt_data_with_aad(
+            archive.metadata.body,
+            k,
+            &archive.metadata.nonce,
+            archive.header_bytes,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
     } else {
-        meta_body.to_vec()
+        if archive.is_encrypted() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Archive is encrypted",
+            ));
+        }
+        archive.metadata.body.to_vec()
     };
-
-    let mut m = 0;
-    let num_files = u32::from_le_bytes(meta_data[m..m + 4].try_into().unwrap());
-    m += 4;
-    let mut files = Vec::new();
-    for _ in 0..num_files {
-        let path_len = u16::from_le_bytes(meta_data[m..m + 2].try_into().unwrap()) as usize;
-        m += 2;
-        let path = String::from_utf8_lossy(&meta_data[m..m + path_len]).to_string();
-        m += path_len;
-        let size = u64::from_le_bytes(meta_data[m..m + 8].try_into().unwrap()) as usize;
-        m += 8;
-        files.push((path, size));
-    }
+    let files = parse_metadata(&meta_data)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     ui::info(
         "Archive",
         &format!(
             "{}  ·  {} block{}  ·  {}",
-            human(uncomp_size as usize),
-            num_blocks,
-            if num_blocks == 1 { "" } else { "s" },
+            human(archive.header.uncompressed_size as usize),
+            archive.header.num_blocks,
+            if archive.header.num_blocks == 1 {
+                ""
+            } else {
+                "s"
+            },
             if key.is_some() {
                 "encrypted"
             } else {
@@ -565,128 +584,29 @@ fn decompress(input_path: &str, output_dir: &str) -> std::io::Result<()> {
         ),
     );
 
-    let mut offset = 56 + meta_total;
-    let mut final_output = Vec::with_capacity(uncomp_size as usize);
     let t = Instant::now();
-
-    for block_idx in 0..num_blocks {
-        ui::progress(block_idx + 1, num_blocks);
-
-        let nonce: [u8; 24] = buffer[offset..offset + 24].try_into().unwrap();
-        let body_len =
-            u32::from_le_bytes(buffer[offset + 24..offset + 28].try_into().unwrap()) as usize;
-        offset += 28;
-
-        let prim = u32::from_le_bytes(buffer[offset..offset + 4].try_into().unwrap()) as usize;
-        let uncomp_len =
-            u32::from_le_bytes(buffer[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let ir_len =
-            u32::from_le_bytes(buffer[offset + 8..offset + 12].try_into().unwrap()) as usize;
-        let bit_len =
-            u32::from_le_bytes(buffer[offset + 12..offset + 16].try_into().unwrap()) as usize;
-        offset += 16;
-
-        let encrypted_body = &buffer[offset..offset + body_len];
-        offset += body_len;
-
-        let body = if let Some(ref k) = key {
-            decrypt_data(encrypted_body, k, &nonce)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-        } else {
-            encrypted_body.to_vec()
-        };
-
-        let tree_payload = &body[0..ir_len];
-        let bitstream = &body[ir_len..ir_len + bit_len];
-
-        let canonical_codes = get_canonical_codes(tree_payload);
-        let root = build_canonical_tree(&canonical_codes);
-        let mut ir_payload = Vec::new();
-        ir_payload.push(OpCode::Jump as u8);
-        ir_payload.extend_from_slice(&0u32.to_le_bytes());
-        let mut leaf_jumps = Vec::new();
-        let root_ip = emit_node(&root, &mut ir_payload, &mut leaf_jumps);
-        ir_payload[1..5].copy_from_slice(&root_ip.to_le_bytes());
-        for pos in leaf_jumps {
-            ir_payload[pos..pos + 4].copy_from_slice(&root_ip.to_le_bytes());
-        }
-
-        let mut output_buffer = vec![0u8; uncomp_len];
-        let mut mtf_state: Vec<u8> = (0..=255).collect();
-
-        let result = unsafe {
-            compile_and_run_jit(
-                ir_payload.as_ptr(),
-                ir_payload.len() as u64,
-                bitstream.as_ptr(),
-                output_buffer.as_mut_ptr(),
-                uncomp_len as u64,
-                mtf_state.as_mut_ptr(),
-            )
-        };
-
-        if result.status_code == 0 {
-            let final_data = inverse_bwt(&output_buffer[0..result.bytes_written as usize], prim);
-            final_output.extend_from_slice(&final_data);
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("JIT fault on block {block_idx}"),
-            ));
-        }
-    }
+    extract_archive(
+        &archive,
+        key.as_ref(),
+        std::path::Path::new(output_dir),
+        |curr, total| {
+            ui::progress(curr, total);
+        },
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     println!();
-    let mut current_pos = 0;
-    for (path, size) in files {
-        let full_path = std::path::Path::new(output_dir).join(&path);
-        if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut out_file = File::create(&full_path)?;
-        out_file.write_all(&final_output[current_pos..current_pos + size])?;
-        current_pos += size;
-    }
-
     ui::done(
         "Extracted",
         &format!(
             "{} file{}  →  {output_dir}  ({})",
-            num_files,
-            if num_files == 1 { "" } else { "s" },
+            files.len(),
+            if files.len() == 1 { "" } else { "s" },
             elapsed(t)
         ),
     );
     ui::nl();
     Ok(())
-}
-
-// ── FFI ───────────────────────────────────────────────────────────────────────
-
-#[link(name = "jit_engine")]
-unsafe extern "C" {
-    fn compile_and_run_jit(
-        ir_ptr: *const u8,
-        ir_len: u64,
-        bitstream_ptr: *const u8,
-        output_ptr: *mut u8,
-        output_limit: u64,
-        mtf_ptr: *mut u8,
-    ) -> DecompressResult;
-
-    fn compile_and_run_query(
-        ir_ptr: *const u8,
-        ir_len: u64,
-        bitstream_ptr: *const u8,
-        output_ptr: *mut u8,
-        output_limit: u64,
-        mtf_ptr: *mut u8,
-        pattern_ptr: *const u8,
-        pattern_len: u64,
-        matches_ptr: *mut u64,
-        matches_limit: u64,
-        primary_idx: u64,
-    ) -> DecompressResult;
 }
 
 // ── query ─────────────────────────────────────────────────────────────────────
@@ -698,158 +618,275 @@ fn query(input_path: &str, pattern: &str) -> std::io::Result<()> {
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
 
-    if buffer.len() < 56 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Header too short",
-        ));
-    }
-    if &buffer[0..4] != b"\x7FJPF" {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Not a .jpf archive",
-        ));
-    }
+    let archive = parse_archive(&buffer, ArchiveLimits::default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    let _version = u16::from_le_bytes(buffer[4..6].try_into().unwrap());
-    let _target_isa = u16::from_le_bytes(buffer[6..8].try_into().unwrap());
-    let _uncomp = u64::from_le_bytes(buffer[8..16].try_into().unwrap());
-    let num_blocks = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
-    let flags = u32::from_le_bytes(buffer[24..28].try_into().unwrap());
-    let salt = &buffer[28..44];
-    let meta_total = u64::from_le_bytes(buffer[44..52].try_into().unwrap()) as usize;
-
-    let key = if (flags & 1) != 0 {
+    let key = if archive.is_encrypted() {
         eprint!("  Password: ");
         std::io::stderr().flush().unwrap();
         let pass = read_password().expect("Failed to read password");
-        Some(derive_key(&pass, salt))
+        Some(derive_key(&pass, &archive.header.salt))
     } else {
         None
     };
 
-    let meta_nonce: [u8; 24] = buffer[56..80].try_into().unwrap();
-    let meta_body_len = u32::from_le_bytes(buffer[80..84].try_into().unwrap()) as usize;
-    let meta_body = &buffer[84..84 + meta_body_len];
+    let matches = query_archive(&archive, key.as_ref(), pattern)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-    let meta_data = if let Some(ref k) = key {
-        decrypt_data(meta_body, k, &meta_nonce)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-    } else {
-        meta_body.to_vec()
-    };
-
-    let mut m = 0;
-    let num_files = u32::from_le_bytes(meta_data[m..m + 4].try_into().unwrap());
-    m += 4;
-    let mut files = Vec::new();
-    for _ in 0..num_files {
-        let path_len = u16::from_le_bytes(meta_data[m..m + 2].try_into().unwrap()) as usize;
-        m += 2;
-        let path = String::from_utf8_lossy(&meta_data[m..m + path_len]).to_string();
-        m += path_len;
-        let size = u64::from_le_bytes(meta_data[m..m + 8].try_into().unwrap()) as usize;
-        m += 8;
-        files.push((path, size));
-    }
-
-    let mut offset = 56 + meta_total;
-    let mut current_pos = 0;
-    let mut total_matches = 0;
-
-    for block_idx in 0..num_blocks {
-        let nonce: [u8; 24] = buffer[offset..offset + 24].try_into().unwrap();
-        let body_len =
-            u32::from_le_bytes(buffer[offset + 24..offset + 28].try_into().unwrap()) as usize;
-        offset += 28;
-
-        let prim = u32::from_le_bytes(buffer[offset..offset + 4].try_into().unwrap()) as usize;
-        let uncomp_len =
-            u32::from_le_bytes(buffer[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let ir_len =
-            u32::from_le_bytes(buffer[offset + 8..offset + 12].try_into().unwrap()) as usize;
-        let bit_len =
-            u32::from_le_bytes(buffer[offset + 12..offset + 16].try_into().unwrap()) as usize;
-        offset += 16;
-
-        let encrypted_body = &buffer[offset..offset + body_len];
-        offset += body_len;
-
-        let body = if let Some(ref k) = key {
-            decrypt_data(encrypted_body, k, &nonce)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-        } else {
-            encrypted_body.to_vec()
-        };
-
-        let tree_payload = &body[0..ir_len];
-        let bitstream = &body[ir_len..ir_len + bit_len];
-
-        let canonical_codes = get_canonical_codes(tree_payload);
-        let root = build_canonical_tree(&canonical_codes);
-        let mut ir_payload = Vec::new();
-        ir_payload.push(OpCode::Jump as u8);
-        ir_payload.extend_from_slice(&0u32.to_le_bytes());
-        let mut leaf_jumps = Vec::new();
-        let root_ip = emit_node(&root, &mut ir_payload, &mut leaf_jumps);
-        ir_payload[1..5].copy_from_slice(&root_ip.to_le_bytes());
-        for pos in leaf_jumps {
-            ir_payload[pos..pos + 4].copy_from_slice(&root_ip.to_le_bytes());
-        }
-
-        let mut bwt_buffer = vec![0u8; uncomp_len];
-        let mut mtf_state: Vec<u8> = (0..=255).collect();
-        let mut matches = vec![0u64; 1024];
-
-        let result = unsafe {
-            compile_and_run_query(
-                ir_payload.as_ptr(),
-                ir_payload.len() as u64,
-                bitstream.as_ptr(),
-                bwt_buffer.as_mut_ptr(),
-                uncomp_len as u64,
-                mtf_state.as_mut_ptr(),
-                pattern.as_ptr(),
-                pattern.len() as u64,
-                matches.as_mut_ptr(),
-                matches.len() as u64,
-                prim as u64,
-            )
-        };
-
-        if result.status_code == 0 {
-            let n = result.bytes_written as usize;
-            for i in 0..n {
-                let match_off = matches[i] as usize;
-                let mut file_off = 0;
-                for (name, size) in &files {
-                    if current_pos + match_off >= file_off
-                        && current_pos + match_off < file_off + size
-                    {
-                        ui::match_hit(name, current_pos + match_off - file_off);
-                        break;
-                    }
-                    file_off += size;
-                }
-            }
-            total_matches += n;
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("JIT fault on block {block_idx}"),
-            ));
-        }
-        current_pos += uncomp_len;
+    for m in &matches {
+        ui::match_hit(&m.path, m.offset);
     }
 
     ui::nl();
     ui::done(
         "Found",
         &format!(
-            "{total_matches} match{}",
-            if total_matches == 1 { "" } else { "es" }
+            "{} match{}",
+            matches.len(),
+            if matches.len() == 1 { "" } else { "es" }
         ),
     );
+    ui::nl();
+    Ok(())
+}
+
+// ── info ──────────────────────────────────────────────────────────────────────
+
+fn info_archive_contents(input_path: &str) -> std::io::Result<()> {
+    let mut file = File::open(input_path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    let archive = parse_archive(&buffer, ArchiveLimits::default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let key = if archive.is_encrypted() {
+        eprint!("  Password: ");
+        std::io::stderr().flush().unwrap();
+        let pass = read_password().expect("Failed to read password");
+        Some(derive_key(&pass, &archive.header.salt))
+    } else {
+        None
+    };
+
+    let files = inspect_metadata(&archive, key.as_ref())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    ui::banner();
+    println!("  Archive Layout Info:");
+    ui::divider();
+    ui::info("Format version", &format!("v{}", ARCHIVE_VERSION));
+    ui::info(
+        "Target ISA",
+        if archive.header.target_isa == 1 {
+            "AArch64"
+        } else {
+            "x86_64"
+        },
+    );
+    ui::info(
+        "Encryption",
+        if archive.is_encrypted() {
+            "XChaCha20-Poly1305 (Argon2 salt present)"
+        } else {
+            "no encryption"
+        },
+    );
+    ui::info(
+        "Metadata size",
+        &format!(
+            "{} (envelope: {})",
+            human(archive.metadata.body.len()),
+            human(archive.metadata.body.len() + 28)
+        ),
+    );
+    ui::info(
+        "Data blocks",
+        &format!(
+            "{} block{}",
+            archive.header.num_blocks,
+            if archive.header.num_blocks == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ),
+    );
+    ui::info(
+        "Uncompressed",
+        &human(archive.header.uncompressed_size as usize),
+    );
+    ui::info(
+        "Files count",
+        &format!(
+            "{} file{}",
+            files.len(),
+            if files.len() == 1 { "" } else { "s" }
+        ),
+    );
+    ui::nl();
+
+    Ok(())
+}
+
+// ── list ──────────────────────────────────────────────────────────────────────
+
+fn list_archive_contents(input_path: &str) -> std::io::Result<()> {
+    let mut file = File::open(input_path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    let archive = parse_archive(&buffer, ArchiveLimits::default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let key = if archive.is_encrypted() {
+        eprint!("  Password: ");
+        std::io::stderr().flush().unwrap();
+        let pass = read_password().expect("Failed to read password");
+        Some(derive_key(&pass, &archive.header.salt))
+    } else {
+        None
+    };
+
+    let files = inspect_metadata(&archive, key.as_ref())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let max_path_len = files.iter().map(|f| f.path.len()).max().unwrap_or(20);
+    // Cap path width to a maximum of 40 to avoid breaking mobile terminals
+    let path_width = max_path_len.min(40).max(10);
+    let divider_len = path_width + 4 + 12;
+
+    ui::banner();
+    println!("  {:<width$}    {:>12}", "Path", "Size", width = path_width);
+    if std::env::var("NO_COLOR").is_err() {
+        println!("  \x1b[2m{}\x1b[0m", "─".repeat(divider_len));
+    } else {
+        println!("  {}", "─".repeat(divider_len));
+    }
+
+    let mut total_size = 0u64;
+    for entry in &files {
+        let path_str = if entry.path.len() > path_width {
+            let half = (path_width - 3) / 2;
+            format!(
+                "{}...{}",
+                &entry.path[..half],
+                &entry.path[entry.path.len() - half..]
+            )
+        } else {
+            entry.path.clone()
+        };
+        println!(
+            "  {:<width$}    {:>12}",
+            path_str,
+            human(entry.size as usize),
+            width = path_width
+        );
+        total_size += entry.size;
+    }
+
+    if std::env::var("NO_COLOR").is_err() {
+        println!("  \x1b[2m{}\x1b[0m", "─".repeat(divider_len));
+    } else {
+        println!("  {}", "─".repeat(divider_len));
+    }
+    println!(
+        "  Total: {} file{} ({})",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        human(total_size as usize)
+    );
+    ui::nl();
+
+    Ok(())
+}
+
+// ── tree ──────────────────────────────────────────────────────────────────────
+
+struct TreeNode {
+    name: String,
+    size: Option<u64>,
+    children: std::collections::BTreeMap<String, TreeNode>,
+}
+
+fn build_tree(files: &[FileEntry]) -> TreeNode {
+    let mut root = TreeNode {
+        name: ".".to_string(),
+        size: None,
+        children: std::collections::BTreeMap::new(),
+    };
+
+    for entry in files {
+        let parts: Vec<&str> = entry.path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current = &mut root;
+        for (i, part) in parts.iter().enumerate() {
+            let is_last = i == parts.len() - 1;
+            current = current
+                .children
+                .entry(part.to_string())
+                .or_insert_with(|| TreeNode {
+                    name: part.to_string(),
+                    size: if is_last { Some(entry.size) } else { None },
+                    children: std::collections::BTreeMap::new(),
+                });
+        }
+    }
+
+    root
+}
+
+fn print_tree_node(node: &TreeNode, prefix: &str, is_last: bool) {
+    if node.name != "." {
+        let connector = if is_last { "└── " } else { "├── " };
+        let size_str = match node.size {
+            Some(sz) => format!(" ({})", human(sz as usize)),
+            None => "/".to_string(),
+        };
+        println!("{}{}{}{}", prefix, connector, node.name, size_str);
+    } else {
+        println!(".");
+    }
+
+    let next_prefix = if node.name == "." {
+        "".to_string()
+    } else if is_last {
+        format!("{}    ", prefix)
+    } else {
+        format!("{}│   ", prefix)
+    };
+
+    let children_list: Vec<&TreeNode> = node.children.values().collect();
+    for (i, child) in children_list.iter().enumerate() {
+        let child_is_last = i == children_list.len() - 1;
+        print_tree_node(child, &next_prefix, child_is_last);
+    }
+}
+
+fn tree_archive_contents(input_path: &str) -> std::io::Result<()> {
+    let mut file = File::open(input_path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    let archive = parse_archive(&buffer, ArchiveLimits::default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let key = if archive.is_encrypted() {
+        eprint!("  Password: ");
+        std::io::stderr().flush().unwrap();
+        let pass = read_password().expect("Failed to read password");
+        Some(derive_key(&pass, &archive.header.salt))
+    } else {
+        None
+    };
+
+    let files = inspect_metadata(&archive, key.as_ref())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    ui::banner();
+
+    let root = build_tree(&files);
+    print_tree_node(&root, "", true);
+
     ui::nl();
     Ok(())
 }
