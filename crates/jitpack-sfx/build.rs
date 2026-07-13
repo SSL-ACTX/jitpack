@@ -27,6 +27,7 @@ fn main() {
             "-O",
             "ReleaseSafe",
             "-fPIC",
+            "-fno-stack-check",
             &format!("-femit-bin={}", output_file),
             "-target",
             zig_target,

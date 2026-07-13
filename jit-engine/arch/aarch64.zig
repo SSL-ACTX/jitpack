@@ -2,6 +2,8 @@ const std = @import("std");
 
 threadlocal var ir_to_mc_buffer: [4096]u32 align(64) = undefined;
 threadlocal var next_pos_buffer: [256 * 1024]usize align(64) = undefined;
+threadlocal var counts_buffer: [256]usize = undefined;
+threadlocal var starts_buffer: [256]usize = undefined;
 
 pub const Assembler = struct {
     buffer: []u8,
@@ -163,12 +165,12 @@ fn compile_internal(
         const written = func(bitstream_ptr, output_ptr, output_ptr + output_limit, mtf_ptr);
         const bwt_data = output_ptr[0..written];
         
-        var counts: [256]usize = undefined;
-        @memset(&counts, 0);
+        const counts = counts_buffer[0..256];
+        @memset(counts, 0);
         for (bwt_data) |b| counts[b] += 1;
         
-        var starts: [256]usize = undefined;
-        @memset(&starts, 0);
+        const starts = starts_buffer[0..256];
+        @memset(starts, 0);
         var sum: usize = 0;
         for (0..256) |i| {
             starts[i] = sum;
