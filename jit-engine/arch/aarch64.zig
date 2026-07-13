@@ -1,7 +1,7 @@
 const std = @import("std");
 
 threadlocal var ir_to_mc_buffer: [8192]u32 align(64) = undefined;
-threadlocal var next_pos_buffer: [256 * 1024]usize align(64) = undefined;
+threadlocal var next_pos_buffer: [256 * 1024]u32 align(64) = undefined;
 threadlocal var counts_buffer: [256]usize = undefined;
 threadlocal var starts_buffer: [256]usize = undefined;
 
@@ -180,7 +180,7 @@ fn compile_internal(
         if (written > next_pos_buffer.len) return error.BlockSizeTooLarge;
         const next_pos = next_pos_buffer[0..written];
         for (bwt_data, 0..) |b, i| {
-            next_pos[starts[b]] = i;
+            next_pos[starts[b]] = @intCast(i);
             starts[b] += 1;
         }
 
@@ -195,8 +195,8 @@ fn compile_internal(
         mas.emit(0xd280000a); // mov x10, #0 (pos)
 
         const loop_top = mas.pos;
-        mas.emit(0xd37df0cb); // lsl x11, x6, #3
-        mas.emit(0xf86b680b); // ldr x11, [x0, x11]
+        mas.emit(0xd37ef4cb); // lsl x11, x6, #2
+        mas.emit(0xb86b680b); // ldr w11, [x0, x11]
         mas.emit(0xaa0b03e6); // mov x6, x11
         mas.emit(0x386b682c); // ldrb w12, [x1, x11]
 
@@ -263,7 +263,7 @@ fn compile_internal(
         mas.emit(0xd65f03c0); // ret
 
         if (!matcher_buf.makeExecutable()) return error.MakeExecutableFailed;
-        const MatcherFn = *const fn (np: [*]const usize, bwt: [*]const u8, m: [*]u64, n: u64, pri: u64, lim: u64) callconv(.c) u64;
+        const MatcherFn = *const fn (np: [*]const u32, bwt: [*]const u8, m: [*]u64, n: u64, pri: u64, lim: u64) callconv(.c) u64;
         const matcher: MatcherFn = @ptrCast(matcher_buf.ptr);
         return matcher(next_pos.ptr, bwt_data.ptr, matches_ptr.?, written, primary_idx, matches_limit);
     }

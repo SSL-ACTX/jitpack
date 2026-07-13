@@ -1,6 +1,6 @@
 const std = @import("std");
 
-threadlocal var next_pos_buffer: [256 * 1024]usize align(64) = undefined;
+threadlocal var next_pos_buffer: [256 * 1024]u32 align(64) = undefined;
 threadlocal var counts_buffer: [256]usize = undefined;
 threadlocal var starts_buffer: [256]usize = undefined;
 
@@ -179,7 +179,7 @@ pub fn compile_and_run_query(
     if (written > next_pos_buffer.len) return error.BlockSizeTooLarge;
     const next_pos = next_pos_buffer[0..written];
     for (bwt_data, 0..) |b, i| {
-        next_pos[starts[b]] = i;
+        next_pos[starts[b]] = @intCast(i);
         starts[b] += 1;
     }
 
@@ -191,8 +191,8 @@ pub fn compile_and_run_query(
     const p = pattern_ptr[0..pattern_len];
 
     for (0..written) |_| {
-        curr = next_pos[curr];
-        const char = bwt_data[curr];
+        curr = next_pos[@intCast(curr)];
+        const char = bwt_data[@intCast(curr)];
 
         if (char == p[state]) {
             state += 1;

@@ -5,6 +5,7 @@ use chacha20poly1305::{
 };
 use divsufsort::sort_in_place;
 use rand_core::{OsRng, RngCore};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt;
@@ -500,10 +501,10 @@ pub fn inverse_bwt(bwt: &[u8], primary: usize) -> Vec<u8> {
         sum += counts[i];
     }
 
-    let mut lf = vec![0usize; n];
+    let mut lf = vec![0u32; n];
     for i in 0..n {
         let b = bwt[i] as usize;
-        lf[i] = starts[b];
+        lf[i] = starts[b] as u32;
         starts[b] += 1;
     }
 
@@ -511,7 +512,7 @@ pub fn inverse_bwt(bwt: &[u8], primary: usize) -> Vec<u8> {
     let mut curr = primary;
     for i in (0..n).rev() {
         out[i] = bwt[curr];
-        curr = lf[curr];
+        curr = lf[curr] as usize;
     }
     out
 }
@@ -865,7 +866,7 @@ pub fn extract_archive(
     archive: &ArchiveView<'_>,
     key: Option<&[u8; 32]>,
     output_dir: &Path,
-    mut progress_callback: impl FnMut(u64, u64),
+    progress_callback: impl FnMut(u64, u64) + Send,
 ) -> Result<(), String> {
     let meta_data = if let Some(k) = key {
         decrypt_data_with_aad(
@@ -895,9 +896,25 @@ pub fn extract_archive(
         .map_err(|_| "archive is too large for this platform".to_string())?;
     let mut final_output = Vec::with_capacity(output_capacity);
 
-    for (block_idx, block) in archive.blocks.iter().enumerate() {
-        progress_callback((block_idx + 1) as u64, archive.header.num_blocks);
-        let decompressed = decompress_block(block, key, block_idx, archive.header_bytes)?;
+    let progress_callback = std::sync::Arc::new(std::sync::Mutex::new(progress_callback));
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let decompressed_blocks: Result<Vec<Vec<u8>>, String> = archive
+        .blocks
+        .par_iter()
+        .enumerate()
+        .map(|(block_idx, block)| {
+            let res = decompress_block(block, key, block_idx, archive.header_bytes);
+            let prev = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Ok(mut cb) = progress_callback.lock() {
+                cb((prev + 1) as u64, archive.header.num_blocks);
+            }
+            res
+        })
+        .collect();
+
+    let decompressed_blocks = decompressed_blocks?;
+    for decompressed in decompressed_blocks {
         final_output.extend_from_slice(&decompressed);
     }
 
@@ -960,93 +977,113 @@ pub fn query_archive(
     let files = parse_metadata(&meta_data).map_err(|e| format!("failed to parse metadata: {e}"))?;
 
     let mut query_matches = Vec::new();
-    let mut current_pos = 0usize;
 
-    for (block_idx, block) in archive.blocks.iter().enumerate() {
-        let body = if let Some(k) = key {
-            decrypt_data_with_aad(
-                block.body,
-                k,
-                &block.nonce,
-                &block_aad(
-                    archive.header_bytes,
-                    block_idx as u64,
-                    block.primary_index,
-                    block.uncompressed_size,
-                    block.code_lengths_len,
-                    block.bitstream_len,
-                ),
-            )?
-        } else {
-            block.body.to_vec()
-        };
+    let block_offsets: Vec<usize> = archive
+        .blocks
+        .iter()
+        .scan(0, |state, block| {
+            let current = *state;
+            *state += block.uncompressed_size as usize;
+            Some(current)
+        })
+        .collect();
 
-        if body.len() < block.code_lengths_len as usize {
-            return Err("block body is shorter than Huffman code lengths".to_string());
-        }
-        let tree_payload = &body[..block.code_lengths_len as usize];
-        let bitstream = &body[block.code_lengths_len as usize..];
+    let results: Result<Vec<Vec<QueryMatch>>, String> = archive
+        .blocks
+        .par_iter()
+        .enumerate()
+        .map(|(block_idx, block)| {
+            let current_pos = block_offsets[block_idx];
+            let body = if let Some(k) = key {
+                decrypt_data_with_aad(
+                    block.body,
+                    k,
+                    &block.nonce,
+                    &block_aad(
+                        archive.header_bytes,
+                        block_idx as u64,
+                        block.primary_index,
+                        block.uncompressed_size,
+                        block.code_lengths_len,
+                        block.bitstream_len,
+                    ),
+                )?
+            } else {
+                block.body.to_vec()
+            };
 
-        let canonical_codes = get_canonical_codes(tree_payload);
-        let root = build_canonical_tree(&canonical_codes);
-        let mut ir_payload = Vec::new();
-        ir_payload.push(OpCode::Jump as u8);
-        ir_payload.extend_from_slice(&0u32.to_le_bytes());
-        let mut leaf_jumps = Vec::new();
-        let root_ip = emit_node(&root, &mut ir_payload, &mut leaf_jumps);
-        ir_payload[1..5].copy_from_slice(&root_ip.to_le_bytes());
-        for pos in leaf_jumps {
-            ir_payload[pos..pos + 4].copy_from_slice(&root_ip.to_le_bytes());
-        }
-
-        let mut bwt_buffer = vec![0u8; block.uncompressed_size as usize];
-        let mut mtf_state: Vec<u8> = (0..=255).collect();
-        let mut matches = vec![0u64; 1024];
-
-        let result = unsafe {
-            compile_and_run_query(
-                ir_payload.as_ptr(),
-                ir_payload.len() as u64,
-                bitstream.as_ptr(),
-                bwt_buffer.as_mut_ptr(),
-                block.uncompressed_size as u64,
-                mtf_state.as_mut_ptr(),
-                pattern.as_ptr(),
-                pattern.len() as u64,
-                matches.as_mut_ptr(),
-                matches.len() as u64,
-                block.primary_index as u64,
-            )
-        };
-
-        if result.status_code == 0 {
-            let n = result.bytes_written as usize;
-            for &m in matches.iter().take(n) {
-                let match_off = m as usize;
-                let mut file_off = 0;
-                for entry in &files {
-                    let size = usize::try_from(entry.size)
-                        .map_err(|_| "file is too large for this platform".to_string())?;
-                    if current_pos + match_off >= file_off
-                        && current_pos + match_off < file_off + size
-                    {
-                        query_matches.push(QueryMatch {
-                            path: entry.path.to_string(),
-                            offset: current_pos + match_off - file_off,
-                        });
-                        break;
-                    }
-                    file_off += size;
-                }
+            if body.len() < block.code_lengths_len as usize {
+                return Err("block body is shorter than Huffman code lengths".to_string());
             }
-        } else {
-            return Err(format!(
-                "JIT fault on query block {block_idx}: code {}",
-                result.status_code
-            ));
-        }
+            let tree_payload = &body[..block.code_lengths_len as usize];
+            let bitstream = &body[block.code_lengths_len as usize..];
 
-        current_pos += block.uncompressed_size as usize;
+            let canonical_codes = get_canonical_codes(tree_payload);
+            let root = build_canonical_tree(&canonical_codes);
+            let mut ir_payload = Vec::new();
+            ir_payload.push(OpCode::Jump as u8);
+            ir_payload.extend_from_slice(&0u32.to_le_bytes());
+            let mut leaf_jumps = Vec::new();
+            let root_ip = emit_node(&root, &mut ir_payload, &mut leaf_jumps);
+            ir_payload[1..5].copy_from_slice(&root_ip.to_le_bytes());
+            for pos in leaf_jumps {
+                ir_payload[pos..pos + 4].copy_from_slice(&root_ip.to_le_bytes());
+            }
+
+            let mut bwt_buffer = vec![0u8; block.uncompressed_size as usize];
+            let mut mtf_state: Vec<u8> = (0..=255).collect();
+            let mut matches = vec![0u64; 1024];
+
+            let result = unsafe {
+                compile_and_run_query(
+                    ir_payload.as_ptr(),
+                    ir_payload.len() as u64,
+                    bitstream.as_ptr(),
+                    bwt_buffer.as_mut_ptr(),
+                    block.uncompressed_size as u64,
+                    mtf_state.as_mut_ptr(),
+                    pattern.as_ptr(),
+                    pattern.len() as u64,
+                    matches.as_mut_ptr(),
+                    matches.len() as u64,
+                    block.primary_index as u64,
+                )
+            };
+
+            let mut local_matches = Vec::new();
+            if result.status_code == 0 {
+                let n = result.bytes_written as usize;
+                for &m in matches.iter().take(n) {
+                    let match_off = m as usize;
+                    let mut file_off = 0;
+                    for entry in &files {
+                        let size = usize::try_from(entry.size)
+                            .map_err(|_| "file is too large for this platform".to_string())?;
+                        if current_pos + match_off >= file_off
+                            && current_pos + match_off < file_off + size
+                        {
+                            local_matches.push(QueryMatch {
+                                path: entry.path.to_string(),
+                                offset: current_pos + match_off - file_off,
+                            });
+                            break;
+                        }
+                        file_off += size;
+                    }
+                }
+                Ok(local_matches)
+            } else {
+                Err(format!(
+                    "JIT fault on query block {block_idx}: code {}",
+                    result.status_code
+                ))
+            }
+        })
+        .collect();
+
+    let results = results?;
+    for local in results {
+        query_matches.extend(local);
     }
 
     Ok(query_matches)
