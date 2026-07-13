@@ -455,18 +455,26 @@ pub fn bwt(input: &[u8]) -> (Vec<u8>, usize) {
         return (vec![input[0]], 0);
     }
 
-    let mut sa = vec![0; n];
-    sort_in_place(input, &mut sa);
+    // Double the input to simulate cyclic suffix sorting
+    let mut doubled = Vec::with_capacity(2 * n);
+    doubled.extend_from_slice(input);
+    doubled.extend_from_slice(input);
+
+    let mut sa2 = vec![0; 2 * n];
+    sort_in_place(&doubled, &mut sa2);
 
     let mut bwt_data = Vec::with_capacity(n);
     let mut primary_idx = 0;
 
-    for (i, &idx) in sa.iter().enumerate() {
-        if idx == 0 {
-            primary_idx = i;
-            bwt_data.push(input[n - 1]);
-        } else {
-            bwt_data.push(input[(idx - 1) as usize]);
+    for &idx in &sa2 {
+        let idx = idx as usize;
+        if idx < n {
+            if idx == 0 {
+                primary_idx = bwt_data.len();
+                bwt_data.push(input[n - 1]);
+            } else {
+                bwt_data.push(input[idx - 1]);
+            }
         }
     }
 
@@ -492,18 +500,18 @@ pub fn inverse_bwt(bwt: &[u8], primary: usize) -> Vec<u8> {
         sum += counts[i];
     }
 
-    let mut next_pos = vec![0usize; n];
+    let mut lf = vec![0usize; n];
     for i in 0..n {
         let b = bwt[i] as usize;
-        next_pos[starts[b]] = i;
+        lf[i] = starts[b];
         starts[b] += 1;
     }
 
-    let mut out = Vec::with_capacity(n);
-    let mut curr = next_pos[primary];
-    for _ in 0..n {
-        out.push(bwt[curr]);
-        curr = next_pos[curr];
+    let mut out = vec![0u8; n];
+    let mut curr = primary;
+    for i in (0..n).rev() {
+        out[i] = bwt[curr];
+        curr = lf[curr];
     }
     out
 }
@@ -1082,6 +1090,75 @@ pub fn inspect_metadata(
     Ok(files)
 }
 
+pub fn extract_file(
+    archive: &ArchiveView<'_>,
+    key: Option<&[u8; 32]>,
+    target_path: &str,
+) -> Result<Vec<u8>, String> {
+    let meta_data = if let Some(k) = key {
+        decrypt_data_with_aad(
+            archive.metadata.body,
+            k,
+            &archive.metadata.nonce,
+            archive.header_bytes,
+        )?
+    } else {
+        if archive.is_encrypted() {
+            return Err("archive is encrypted but no decryption key was provided".to_string());
+        }
+        archive.metadata.body.to_vec()
+    };
+
+    let files = parse_metadata(&meta_data).map_err(|e| format!("failed to parse metadata: {e}"))?;
+
+    let mut file_start = 0usize;
+    let mut target_entry = None;
+    for entry in &files {
+        let size = usize::try_from(entry.size)
+            .map_err(|_| "file is too large for this platform".to_string())?;
+        if entry.path == target_path {
+            target_entry = Some((file_start, file_start + size));
+            break;
+        }
+        file_start += size;
+    }
+
+    let (file_start, file_end) = match target_entry {
+        Some(range) => range,
+        None => return Err(format!("file not found in archive: {target_path}")),
+    };
+
+    let mut file_data = Vec::with_capacity(file_end - file_start);
+    let mut current_block_start = 0usize;
+
+    for (block_idx, block) in archive.blocks.iter().enumerate() {
+        let block_len = block.uncompressed_size as usize;
+        let current_block_end = current_block_start + block_len;
+
+        if current_block_start < file_end && current_block_end > file_start {
+            let decompressed = decompress_block(block, key, block_idx, archive.header_bytes)?;
+            let start_in_block = if file_start > current_block_start {
+                file_start - current_block_start
+            } else {
+                0
+            };
+            let end_in_block = if file_end < current_block_end {
+                file_end - current_block_start
+            } else {
+                block_len
+            };
+            file_data.extend_from_slice(&decompressed[start_in_block..end_in_block]);
+        }
+
+        current_block_start = current_block_end;
+        if current_block_start >= file_end {
+            break;
+        }
+    }
+
+    Ok(file_data)
+}
+
 #[cfg(test)]
 mod archive_tests {
     use super::*;
@@ -1128,6 +1205,14 @@ mod archive_tests {
         assert_eq!(inspected.len(), 1);
         assert_eq!(inspected[0].path, "a");
         assert_eq!(inspected[0].size, 1);
+    }
+
+    #[test]
+    fn test_bwt_roundtrip() {
+        let original = b"Hello, this is a longer text to test the BWT and inverse BWT roundtrip. Let's make sure it doesn't scramble anything!";
+        let (bwt_data, prim) = bwt(original);
+        let inverted = inverse_bwt(&bwt_data, prim);
+        assert_eq!(original.to_vec(), inverted);
     }
 
     #[test]

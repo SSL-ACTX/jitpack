@@ -276,6 +276,18 @@ fn main() {
             }
         }
 
+        "cat" => {
+            if args.len() < 4 {
+                ui::error("Missing archive or file path.");
+                eprintln!("  Usage: jitpack cat <input.jpf> <file_path>");
+                return;
+            }
+            if let Err(e) = cat_file(&args[2], &args[3]) {
+                ui::error(&format!("Cat failed: {e}"));
+                std::process::exit(1);
+            }
+        }
+
         "help" | "--help" | "-h" => print_usage(),
 
         cmd => {
@@ -308,6 +320,7 @@ fn print_usage() {
     println!("     list / ls     List files inside an archive without extracting");
     println!("     tree          Show a visual directory tree structure of the archive");
     println!("     info          Show detailed structural layout of the archive");
+    println!("     cat           Decompress a single file to stdout");
     println!("     help          Show this message");
     ui::nl();
     ui::header("Options");
@@ -888,5 +901,33 @@ fn tree_archive_contents(input_path: &str) -> std::io::Result<()> {
     print_tree_node(&root, "", true);
 
     ui::nl();
+    Ok(())
+}
+
+// ── cat ───────────────────────────────────────────────────────────────────────
+
+fn cat_file(input_path: &str, target_file_path: &str) -> std::io::Result<()> {
+    let mut file = File::open(input_path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    let archive = parse_archive(&buffer, ArchiveLimits::default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let key = if archive.is_encrypted() {
+        eprint!("  Password: ");
+        std::io::stderr().flush().unwrap();
+        let pass = read_password().expect("Failed to read password");
+        Some(derive_key(&pass, &archive.header.salt))
+    } else {
+        None
+    };
+
+    let file_bytes = extract_file(&archive, key.as_ref(), target_file_path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    std::io::stdout().write_all(&file_bytes)?;
+    std::io::stdout().flush()?;
+
     Ok(())
 }

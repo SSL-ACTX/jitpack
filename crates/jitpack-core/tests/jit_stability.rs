@@ -158,4 +158,25 @@ mod tests {
         );
         assert_eq!(matches_limit1[0], 0, "First match should still be found");
     }
+
+    #[test]
+    fn test_decompress_block_and_extract_file() {
+        let data = b"STABILITY";
+        let (prim, uncomp_len, lengths, bitstream) = compress_block(data);
+        let mut block_body = Vec::new();
+        block_body.extend_from_slice(&lengths);
+        block_body.extend_from_slice(&bitstream);
+
+        let block = BlockView {
+            nonce: [0u8; 24],
+            primary_index: prim,
+            uncompressed_size: uncomp_len,
+            code_lengths_len: lengths.len() as u32,
+            bitstream_len: bitstream.len() as u32,
+            body: &block_body,
+        };
+
+        let decompressed = decompress_block(&block, None, 0, &[]).unwrap();
+        assert_eq!(&decompressed, data);
+    }
 }
