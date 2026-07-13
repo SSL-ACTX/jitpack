@@ -15,8 +15,9 @@ fn main() {
     let lib_name = "jit_engine";
     let output_file = format!("{}/lib{}.a", out_dir, lib_name);
 
-    println!("cargo:rerun-if-changed={}", zig_file);
     println!("cargo:rerun-if-changed=../../jit-engine/jit_engine.zig");
+    println!("cargo:rerun-if-changed=../../jit-engine/arch/aarch64.zig");
+    println!("cargo:rerun-if-changed=../../jit-engine/arch/x86_64.zig");
 
     let zig_target = match (target_arch.as_str(), target_os.as_str()) {
         ("aarch64", "android") => "aarch64-linux-android",

@@ -180,6 +180,18 @@ pub const JitBuffer = struct {
     }
 };
 
+fn get_err_code(err: anyerror) u32 {
+    return switch (err) {
+        error.InvalidOpcode => 10,
+        error.JitBufferInitFailed => 11,
+        error.IrTooLong => 12,
+        error.MakeExecutableFailed => 13,
+        error.BlockSizeTooLarge => 14,
+        error.TooManyJumps => 15,
+        else => 1,
+    };
+}
+
 export fn compile_and_run_jit(
     ir_ptr: [*]const u8,
     ir_len: u64,
@@ -189,8 +201,8 @@ export fn compile_and_run_jit(
     mtf_ptr: [*]u8,
 ) DecompressResult {
     const ir = ir_ptr[0..ir_len];
-    const written = arch.compile_and_run(ir, bitstream_ptr, output_ptr, output_limit, mtf_ptr) catch {
-        return .{ .bytes_written = 0, .status_code = 1 };
+    const written = arch.compile_and_run(ir, bitstream_ptr, output_ptr, output_limit, mtf_ptr) catch |err| {
+        return .{ .bytes_written = 0, .status_code = get_err_code(err) };
     };
 
     return .{
@@ -224,13 +236,13 @@ export fn compile_and_run_query(
         matches_ptr,
         matches_limit,
         primary_idx,
-    ) catch {
-        return .{ .bytes_written = 0, .status_code = 1 };
+    ) catch |err| {
+        return .{ .bytes_written = 0, .status_code = get_err_code(err) };
     };
-    // Trigger rebuild benchmark
 
     return .{
         .bytes_written = written,
         .status_code = 0,
     };
 }
+

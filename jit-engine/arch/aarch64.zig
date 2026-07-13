@@ -1,6 +1,6 @@
 const std = @import("std");
 
-threadlocal var ir_to_mc_buffer: [4096]u32 align(64) = undefined;
+threadlocal var ir_to_mc_buffer: [8192]u32 align(64) = undefined;
 threadlocal var next_pos_buffer: [256 * 1024]usize align(64) = undefined;
 threadlocal var counts_buffer: [256]usize = undefined;
 threadlocal var starts_buffer: [256]usize = undefined;

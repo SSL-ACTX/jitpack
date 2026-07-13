@@ -7,7 +7,9 @@ fn main() {
     let lib_name = "jit_engine";
     let output_file = format!("{}/lib{}.a", out_dir, lib_name);
 
-    println!("cargo:rerun-if-changed=../../jit-engine");
+    println!("cargo:rerun-if-changed=../../jit-engine/jit_engine.zig");
+    println!("cargo:rerun-if-changed=../../jit-engine/arch/aarch64.zig");
+    println!("cargo:rerun-if-changed=../../jit-engine/arch/x86_64.zig");
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
