@@ -210,7 +210,7 @@ fn main() -> std::io::Result<()> {
             &archive.metadata.nonce,
             archive.header_bytes,
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
     } else {
         archive.metadata.body.to_vec()
     };
@@ -229,7 +229,7 @@ fn main() -> std::io::Result<()> {
             ui::progress(curr, total);
         },
     )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
 
     println!();
     ui::done(

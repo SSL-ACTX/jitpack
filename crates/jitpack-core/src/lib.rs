@@ -433,7 +433,7 @@ pub fn emit_node(node: &Node, ir: &mut Vec<u8>, leaf_jumps: &mut Vec<usize>) -> 
         ir.push(OpCode::Jump as u8);
         leaf_jumps.push(ir.len());
         ir.extend_from_slice(&0u32.to_le_bytes());
-        return start_ip;
+        start_ip
     } else {
         let left_ip = emit_node(node.left.as_ref().unwrap(), ir, leaf_jumps);
         let right_ip = emit_node(node.right.as_ref().unwrap(), ir, leaf_jumps);
@@ -441,7 +441,7 @@ pub fn emit_node(node: &Node, ir: &mut Vec<u8>, leaf_jumps: &mut Vec<usize>) -> 
         ir.push(OpCode::BranchBit as u8);
         ir.extend_from_slice(&left_ip.to_le_bytes());
         ir.extend_from_slice(&right_ip.to_le_bytes());
-        return start_ip;
+        start_ip
     }
 }
 
@@ -519,8 +519,8 @@ pub fn inverse_bwt(bwt: &[u8], primary: usize) -> Vec<u8> {
 /// Cache-friendly MTF using array copy_within
 pub fn mtf(input: &[u8]) -> Vec<u8> {
     let mut table = [0u8; 256];
-    for i in 0..256 {
-        table[i] = i as u8;
+    for (i, val) in table.iter_mut().enumerate() {
+        *val = i as u8;
     }
 
     let mut out = Vec::with_capacity(input.len());
@@ -1021,8 +1021,8 @@ pub fn query_archive(
 
         if result.status_code == 0 {
             let n = result.bytes_written as usize;
-            for i in 0..n {
-                let match_off = matches[i] as usize;
+            for &m in matches.iter().take(n) {
+                let match_off = m as usize;
                 let mut file_off = 0;
                 for entry in &files {
                     let size = usize::try_from(entry.size)
@@ -1137,11 +1137,7 @@ pub fn extract_file(
 
         if current_block_start < file_end && current_block_end > file_start {
             let decompressed = decompress_block(block, key, block_idx, archive.header_bytes)?;
-            let start_in_block = if file_start > current_block_start {
-                file_start - current_block_start
-            } else {
-                0
-            };
+            let start_in_block = file_start.saturating_sub(current_block_start);
             let end_in_block = if file_end < current_block_end {
                 file_end - current_block_start
             } else {

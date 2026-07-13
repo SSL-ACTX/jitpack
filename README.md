@@ -2,8 +2,9 @@
 
 **A Research Archive Format with JIT-Specialized Decompression**
 
-[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
-[![Zig](https://img.shields.io/badge/Zig-required-f7a41d.svg)](https://ziglang.org/)
+[![CI](https://github.com/SSL-ACTX/jitpack/actions/workflows/ci.yml/badge.svg)](https://github.com/SSL-ACTX/jitpack/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/Rust-1.85.0%2B-orange.svg)](https://www.rust-lang.org/)
+[![Zig](https://img.shields.io/badge/Zig-0.17.0--dev-f7a41d.svg)](https://ziglang.org/)
 [![Status](https://img.shields.io/badge/Status-Experimental-red.svg)]()
 
 > [!IMPORTANT]

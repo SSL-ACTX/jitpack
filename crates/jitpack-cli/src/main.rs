@@ -383,7 +383,7 @@ fn compress(
     let mut all_files = Vec::new();
     for path in input_paths {
         for entry in WalkDir::new(path) {
-            let entry = entry.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let entry = entry.map_err(std::io::Error::other)?;
             if entry.file_type().is_file() {
                 all_files.push(entry.path().to_owned());
             }
@@ -606,7 +606,7 @@ fn decompress(input_path: &str, output_dir: &str) -> std::io::Result<()> {
             ui::progress(curr, total);
         },
     )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
 
     println!();
     ui::done(
@@ -643,8 +643,7 @@ fn query(input_path: &str, pattern: &str) -> std::io::Result<()> {
         None
     };
 
-    let matches = query_archive(&archive, key.as_ref(), pattern)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let matches = query_archive(&archive, key.as_ref(), pattern).map_err(std::io::Error::other)?;
 
     for m in &matches {
         ui::match_hit(&m.path, m.offset);
@@ -766,7 +765,7 @@ fn list_archive_contents(input_path: &str) -> std::io::Result<()> {
 
     let max_path_len = files.iter().map(|f| f.path.len()).max().unwrap_or(20);
     // Cap path width to a maximum of 40 to avoid breaking mobile terminals
-    let path_width = max_path_len.min(40).max(10);
+    let path_width = max_path_len.clamp(10, 40);
     let divider_len = path_width + 4 + 12;
 
     ui::banner();

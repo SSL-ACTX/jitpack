@@ -28,7 +28,7 @@ fn main() {
     };
 
     let status = Command::new("zig")
-        .args(&[
+        .args([
             "build-lib",
             zig_file,
             "-O",
@@ -74,7 +74,7 @@ fn main() {
     );
 
     let status = Command::new("cargo")
-        .args(&[
+        .args([
             "build",
             "--release",
             "-p",
