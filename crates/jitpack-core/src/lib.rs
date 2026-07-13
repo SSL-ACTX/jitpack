@@ -288,8 +288,8 @@ pub fn extraction_path(output_root: &Path, archive_path: &str) -> Result<PathBuf
     for component in path.components() {
         match component {
             Component::Normal(segment) => relative.push(segment),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
                 return Err(ArchiveError::Invalid("unsafe extraction path"));
             }
         }
@@ -1258,7 +1258,11 @@ mod archive_tests {
             extraction_path(root, "nested/file.txt").unwrap(),
             PathBuf::from("output/nested/file.txt")
         );
-        for path in ["../escape", "/absolute", "", "."] {
+        assert_eq!(
+            extraction_path(root, "/absolute").unwrap(),
+            PathBuf::from("output/absolute")
+        );
+        for path in ["../escape", "", "."] {
             assert!(
                 extraction_path(root, path).is_err(),
                 "{path} should be rejected"
