@@ -90,22 +90,25 @@ cargo build --release -p jitpack-cli
 
 ## Command Interface
 
-```bash
-# Create an archive
-cargo run --release -p jitpack-cli -- compress <input...> <output.jpf>
+| Subcommand | Description | Example Usage |
+| :--- | :--- | :--- |
+| `compress` | Compress files or directories into a `.jpf` archive | `jitpack compress <input...> <output.jpf>` |
+| `decompress` | Extract a `.jpf` archive to a target directory | `jitpack decompress <archive.jpf> <output_dir>` |
+| `list` / `ls` | List archive contents in dynamic tabular layout | `jitpack list <archive.jpf>` |
+| `tree` | Display recursive directory tree using box-drawing characters | `jitpack tree <archive.jpf>` |
+| `info` | Show archive layout metadata (version, ISA, encryption, etc.) | `jitpack info <archive.jpf>` |
+| `cat` | Decompress a single file from the archive directly to stdout | `jitpack cat <archive.jpf> <file_path>` |
+| `query` | Run in-memory JIT-compiled pattern search across the archive | `jitpack query <archive.jpf> <pattern>` |
+| `sfx-pack` | Bundle a JPF payload with the SFX stub into an executable | `jitpack sfx-pack <input> <output_exe>` |
 
-# Create an encrypted archive
-cargo run --release -p jitpack-cli -- compress <input...> <output.jpf> --password
+> [!TIP]
+> **Options**:
+> - Use `--password` during `compress` or `sfx-pack` to encrypt archive headers and blocks with Argon2 + XChaCha20-Poly1305.
+>
+> **Development**:
+> - To run commands directly without compiling/installing the alias, use cargo:
+>   `cargo run -p jitpack-cli -- <command> <args>`
 
-# Extract an archive
-cargo run --release -p jitpack-cli -- decompress <input.jpf> <output_dir>
-
-# Search an archive
-cargo run --release -p jitpack-cli -- query <input.jpf> <pattern>
-
-# Build a self-extracting archive
-cargo run --release -p jitpack-cli -- sfx-pack <input> <output_exe>
-```
 
 ---
 
