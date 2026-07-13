@@ -1,0 +1,14 @@
+[package]
+name = "jitpack-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jitpack-core.workspace = true
+rand_core = "0.6"
+rayon.workspace = true
+rpassword = "7.5.4"
+walkdir = "2.5"
+
+[build-dependencies]
+cc.workspace = true

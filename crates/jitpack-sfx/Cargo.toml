@@ -1,0 +1,9 @@
+[package]
+name = "jitpack-sfx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jitpack-core.workspace = true
+rand_core = "0.6"
+rpassword = "7.5.4"

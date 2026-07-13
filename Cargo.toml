@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jitpack-core",
+    "crates/jitpack-cli",
+    "crates/jitpack-sfx",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["JitPack Team"]
+
+[workspace.dependencies]
+rayon = "1.12.0"
+jitpack-core = { path = "crates/jitpack-core" }
+cc = "1.2.63"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
+debug = 0
+strip = true
+panic = "unwind"
+incremental = true
+lto = false
+codegen-units = 256
