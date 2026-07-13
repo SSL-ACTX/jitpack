@@ -10,9 +10,7 @@ fn main() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
-    // -------------------------------------------------------------------------
-    // 1. Compile the Zig JIT engine for the CLI itself.
-    // -------------------------------------------------------------------------
+    // Compile the Zig JIT engine for the CLI itself.
     let zig_file = "../../jit-engine/jit_engine.zig";
     let lib_name = "jit_engine";
     let output_file = format!("{}/lib{}.a", out_dir, lib_name);
@@ -55,12 +53,10 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=static={}", lib_name);
 
-    // -------------------------------------------------------------------------
-    // 2. Build the jitpack-sfx stub and embed it into the CLI.
+    // Build the jitpack-sfx stub and embed it into the CLI.
     //
-    //    We use a dedicated target-dir inside OUT_DIR to avoid conflicting with
-    //    Cargo's own lock on the workspace target directory.
-    // -------------------------------------------------------------------------
+    // We use a dedicated target-dir inside OUT_DIR to avoid conflicting with
+    // Cargo's own lock on the workspace target directory.
     let sfx_target_dir = format!("{}/sfx_build", out_dir);
 
     // Determine the cargo target triple from the env vars Cargo sets for us.
@@ -108,4 +104,20 @@ fn main() {
             e
         )
     });
+
+    // Extract Git commit hash and message for build codename.
+    let commit_hash = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let codename = Command::new("git")
+        .args(["describe", "--tags", "--always", "--dirty"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| commit_hash.clone());
+
+    println!("cargo:rustc-env=GIT_HASH={}", commit_hash);
+    println!("cargo:rustc-env=GIT_CODENAME={}", codename);
 }

@@ -31,15 +31,36 @@ mod ui {
 
     pub fn banner() {
         println!();
+        let codename = option_env!("GIT_CODENAME").unwrap_or("unknown");
+        let hash = option_env!("GIT_HASH").unwrap_or("unknown");
+        let arch = std::env::consts::ARCH;
+        let os = std::env::consts::OS;
+
         if color_enabled() {
             println!(
                 "  {BOLD}{CYAN}⚡ JitPack{R}  {DIM}·{R}  JIT-Powered Archive  {DIM}v{}{R}",
                 env!("CARGO_PKG_VERSION")
             );
+            println!(
+                "  {DIM}Author: {}{R}  {DIM}·{R}  {DIM}Build: {} ({}) [{}-{}]{R}",
+                env!("CARGO_PKG_AUTHORS"),
+                codename,
+                hash,
+                arch,
+                os
+            );
         } else {
             println!(
                 "  ⚡ JitPack  ·  JIT-Powered Archive  v{}",
                 env!("CARGO_PKG_VERSION")
+            );
+            println!(
+                "  Author: {}  ·  Build: {} ({}) [{}-{}]",
+                env!("CARGO_PKG_AUTHORS"),
+                codename,
+                hash,
+                arch,
+                os
             );
         }
         println!();
@@ -156,8 +177,12 @@ fn elapsed(t: Instant) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let bin_name = args
+        .first()
+        .and_then(|s| std::path::Path::new(s).file_name().and_then(|n| n.to_str()))
+        .unwrap_or("jitpack");
     if args.len() < 2 {
-        print_usage();
+        print_usage(bin_name);
         return;
     }
 
@@ -165,7 +190,7 @@ fn main() {
         "compress" => {
             if args.len() < 4 {
                 ui::error("Missing input or output path.");
-                eprintln!("  Usage: jitpack compress <input…> <output.jpf> [--password]");
+                eprintln!("  Usage: {bin_name} compress <input…> <output.jpf> [--password]");
                 return;
             }
             let mut inputs = Vec::new();
@@ -202,7 +227,7 @@ fn main() {
         "decompress" => {
             if args.len() < 4 {
                 ui::error("Missing input or output path.");
-                eprintln!("  Usage: jitpack decompress <input.jpf> <output_dir>");
+                eprintln!("  Usage: {bin_name} decompress <input.jpf> <output_dir>");
                 return;
             }
             ui::banner();
@@ -215,7 +240,7 @@ fn main() {
         "sfx-pack" => {
             if args.len() < 4 {
                 ui::error("Missing input or output path.");
-                eprintln!("  Usage: jitpack sfx-pack <input> <output_exe> [--password]");
+                eprintln!("  Usage: {bin_name} sfx-pack <input> <output_exe> [--password]");
                 return;
             }
             let password_enabled = args.contains(&"--password".to_string());
@@ -230,7 +255,7 @@ fn main() {
         "query" => {
             if args.len() < 4 {
                 ui::error("Missing input or pattern.");
-                eprintln!("  Usage: jitpack query <input.jpf> <pattern>");
+                eprintln!("  Usage: {bin_name} query <input.jpf> <pattern>");
                 return;
             }
             ui::banner();
@@ -243,7 +268,7 @@ fn main() {
         "list" | "ls" => {
             if args.len() < 3 {
                 ui::error("Missing archive path.");
-                eprintln!("  Usage: jitpack list <input.jpf>");
+                eprintln!("  Usage: {bin_name} list <input.jpf>");
                 return;
             }
             if let Err(e) = list_archive_contents(&args[2]) {
@@ -255,7 +280,7 @@ fn main() {
         "tree" => {
             if args.len() < 3 {
                 ui::error("Missing archive path.");
-                eprintln!("  Usage: jitpack tree <input.jpf>");
+                eprintln!("  Usage: {bin_name} tree <input.jpf>");
                 return;
             }
             if let Err(e) = tree_archive_contents(&args[2]) {
@@ -267,7 +292,7 @@ fn main() {
         "info" => {
             if args.len() < 3 {
                 ui::error("Missing archive path.");
-                eprintln!("  Usage: jitpack info <input.jpf>");
+                eprintln!("  Usage: {bin_name} info <input.jpf>");
                 return;
             }
             if let Err(e) = info_archive_contents(&args[2]) {
@@ -279,7 +304,7 @@ fn main() {
         "cat" => {
             if args.len() < 4 {
                 ui::error("Missing archive or file path.");
-                eprintln!("  Usage: jitpack cat <input.jpf> <file_path>");
+                eprintln!("  Usage: {bin_name} cat <input.jpf> <file_path>");
                 return;
             }
             if let Err(e) = cat_file(&args[2], &args[3]) {
@@ -288,11 +313,11 @@ fn main() {
             }
         }
 
-        "help" | "--help" | "-h" => print_usage(),
+        "help" | "--help" | "-h" => print_usage(bin_name),
 
         cmd => {
             ui::error(&format!("Unknown command '{cmd}'"));
-            print_usage();
+            print_usage(bin_name);
             std::process::exit(1);
         }
     }
@@ -308,9 +333,9 @@ fn prompt_password(enabled: bool) -> Option<String> {
     }
 }
 
-fn print_usage() {
+fn print_usage(bin_name: &str) {
     ui::banner();
-    println!("  Usage:  jitpack <command> [args]");
+    println!("  Usage:  {bin_name} <command> [args]");
     ui::nl();
     ui::header("Commands");
     println!("     compress      Compress files or directories into a .jpf archive");
